@@ -832,7 +832,11 @@ static void *zeus_io_thread(void *data)
 			applog(LOG_DEBUG, "select timeout: %d.%06d", (int)tv_rem.tv_sec, (int)tv_rem.tv_usec);
 		}
 
+#ifdef WIN32
+		retval = WSAPoll((WSAPOLLFD)pfds, 2, (tv_rem.tv_sec * 1000) + (tv_rem.tv_usec / 1000));
+#else
 		retval = poll(pfds, 2, (tv_rem.tv_sec * 1000) + (tv_rem.tv_usec / 1000));
+#fi
 
 		if (retval < 0) {				// error
 			if (errno == EINTR)
