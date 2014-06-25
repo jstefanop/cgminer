@@ -1,4 +1,4 @@
-/*
+/*q
  * Copyright 2013-2014 Con Kolivas <kernel@kolivas.org>
  * Copyright 2014 Zeus Integrated Systems Limited
  * Copyright 2014 Dominik Lehner
@@ -762,24 +762,15 @@ static void *zeus_io_thread(void *data)
 	struct cgpu_info *zeus = (struct cgpu_info *)data;
 	struct ZEUS_INFO *info = zeus->device_data;
 	char threadname[24];
-	struct pollfd pfds[2];
+	fd_set rfds;
 	struct timeval tv_now, tv_spent, tv_rem;
-	int retval;
+	int retval, max;
 	bool reopen_device = (using_serial(info) && info->device_fd == -1) ? true : false;
 
 	snprintf(threadname, sizeof(threadname), "Zeus/%d", zeus->device_id);
 	RenameThread(threadname);
 	applog(LOG_INFO, "%s%d: serial I/O thread running, %s",
 						zeus->drv->name, zeus->device_id, threadname);
-
-	if (using_libusb(info))	// in libusb mode get nonces from another thread via pipe
-		pfds[0].fd = info->zm_pipefd[PIPE_R];
-				// in serial mode pfds[0].fd is set in the while loop
-	pfds[0].events = POLLIN;
-	pfds[0].revents = 0;
-	pfds[1].fd = info->wu_pipefd[PIPE_R];
-	pfds[1].events = POLLIN;
-	pfds[1].revents = 0;
 
 	while (likely(!zeus->shutdown)) {
 		mutex_lock(&info->lock);
@@ -793,8 +784,7 @@ static void *zeus_io_thread(void *data)
 			zeus_purge_work(zeus);
 			reopen_device = false;
 		}
-		if (using_serial(info))
-			pfds[0].fd = info->device_fd;
+		
 		mutex_unlock(&info->lock);
 
 		zeus_check_need_work(zeus);
@@ -832,32 +822,28 @@ static void *zeus_io_thread(void *data)
 			applog(LOG_DEBUG, "select timeout: %d.%06d", (int)tv_rem.tv_sec, (int)tv_rem.tv_usec);
 		}
 
-		retval = poll(pfds, 2, (tv_rem.tv_sec * 1000) + (tv_rem.tv_usec / 1000));
+		FD_ZERO(&rfds);
+		FD_SET(info->wu_pipefd[PIPE_R], &rfds);
+		max = info->wu_pipefd[PIPE_R];
+		if (using_libusb(info)) {
+			FD_SET(info->zm_pipefd[PIPE_R], &rfds);
+			max = MAX(max, info->wu_pipefd[PIPE_R]);
+		} else {
+			FD_SET(info->device_fd, &rfds);
+			max = MAX(max, info->device_fd);
+		}
+		
+		retval = select(max+1, &rfds, NULL, NULL, &tv_rem);
 
 		if (retval < 0) {				// error
 			if (errno == EINTR)
 				continue;
-			applog(LOG_NOTICE, "%s%d: Error on poll: %s, shutting down",
+			applog(LOG_NOTICE, "%s%d: Error on select: %s, shutting down",
 				zeus->drv->name, zeus->device_id, strerror(errno));
 			break;
 		} else if (retval > 0) {
-			if (pfds[0].revents & (POLLERR | POLLNVAL)) {	// low level I/O error (usually hardware)
-				pfds[0].revents = 0;
-				if (opt_zeus_debug) {
-					if (pfds[0].revents & POLLNVAL)
-						applog(LOG_DEBUG, "%s%d: Device file descriptor %d invalid",
-						       zeus->drv->name, zeus->device_id, pfds[0].fd);
-					else
-						applog(LOG_DEBUG, "%s%d: Error on file descriptor %d",
-						       zeus->drv->name, zeus->device_id, pfds[0].fd);
-				}
-
-				reopen_device = true;
-				continue;
-			}
-
-			if (pfds[0].revents & POLLIN) {		// event packet
-				pfds[0].revents = 0;
+			if (FD_ISSET(info->device_fd, &rfds) ||
+				FD_ISSET(info->zm_pipefd[PIPE_R], &rfds)) {	// event packet
 				mutex_lock(&info->lock);
 				cgtime(&info->workend);
 				if (!zeus_read_response(zeus)) {
@@ -868,8 +854,7 @@ static void *zeus_io_thread(void *data)
 				mutex_unlock(&info->lock);
 			}
 
-			if (pfds[1].revents & POLLIN) {		// miner thread woke us up
-				pfds[1].revents = 0;
+			if (FD_ISSET(info->wu_pipefd[PIPE_R], &rfds)) {		// miner thread woke us up
 				if (!flush_fd(info->wu_pipefd[PIPE_R])) {
 					// this should never happen, only here in case
 					// an internal error causes pipe to be closed
@@ -885,7 +870,7 @@ static void *zeus_io_thread(void *data)
 		}
 
 		if (opt_zeus_debug)
-			applog(LOG_DEBUG, "poll returned %d", retval);
+			applog(LOG_DEBUG, "select returned %d", retval);
 	}
 
 	zeus->shutdown = true;
