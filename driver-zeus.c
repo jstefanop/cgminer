@@ -16,10 +16,9 @@
 #include <stdio.h>
 #include <sys/time.h>
 #include <sys/types.h>
-#include <sys/select.h>
 #include <unistd.h>
-#include <poll.h>
 #ifndef WIN32
+  #include <sys/select.h>
   #include <termios.h>
   #include <sys/stat.h>
   #include <fcntl.h>
@@ -27,16 +26,13 @@
     #define O_CLOEXEC 0
   #endif
 #else
+  #include "compat.h"
   #include <windows.h>
   #include <io.h>
 #endif
 
-#define ZEUS_USE_LIBUSB
-
 #include "miner.h"
-#ifdef ZEUS_USE_LIBUSB
-  #include "usbutils.h"
-#endif
+#include "usbutils.h"
 #include "fpgautils.h"
 #include "elist.h"
 #include "util.h"
@@ -87,7 +83,7 @@ static void flush_uart(int fd)
 #endif
 }
 
-static int flush_fd(int fd)
+static int __maybe_unused flush_fd(int fd)
 {
 	static char discard[10];
 	return read(fd, discard, sizeof(discard));
@@ -147,8 +143,7 @@ static int lowest_pow2(int min)
 static void notify_io_thread(struct cgpu_info *zeus)
 {
 	struct ZEUS_INFO *info = zeus->device_data;
-	static char tickle = 'W';
-	(void)write(info->wu_pipefd[PIPE_W], &tickle, 1);
+	cgsem_post(&info->wusem);
 }
 
 /************************************************************
@@ -156,7 +151,7 @@ static void notify_io_thread(struct cgpu_info *zeus)
  ************************************************************/
 
 #define zeus_serial_open_detect(devpath, baud, purge) serial_open_ex(devpath, baud, ZEUS_READ_FAULT_DECISECONDS, 0, purge)
-#define zeus_serial_open(devpath, baud, purge) serial_open_ex(devpath, baud, ZEUS_READ_FAULT_DECISECONDS, 1, purge)
+#define zeus_serial_open(devpath, baud, purge) serial_open_ex(devpath, baud, ZEUS_READ_FAULT_DECISECONDS, 0, purge)
 #define zeus_serial_close(fd) close(fd)
 
 static bool zeus_reopen(struct cgpu_info *zeus)
@@ -641,17 +636,26 @@ static bool zeus_read_response(struct cgpu_info *zeus)
 {
 	struct ZEUS_INFO *info = zeus->device_data;
 	unsigned char evtpkt[ZEUS_EVENT_PKT_LEN];
-	int ret, duration_ms;
+	int ret, duration_ms, err;
 	uint32_t nonce, chip, core;
 	bool valid;
 
-	if (using_libusb(info)) {	// in libusb mode data comes to us via the inter-thread pipe
-		ret = read(info->zm_pipefd[PIPE_R], evtpkt, sizeof(evtpkt));
-		if (ret <= 0)
+	if (using_libusb(info)) {
+		err = usb_read_timeout(zeus, (char *)evtpkt, sizeof(evtpkt), &ret, 250, C_GETRESULTS);
+		if (err && err == LIBUSB_ERROR_TIMEOUT) {
 			return false;
-	} else {			// in serial mode we read directly
+		} else if (err && err != LIBUSB_ERROR_TIMEOUT) {
+			applog(LOG_ERR, "%s%d: USB read error: %s",
+				zeus->drv->name, zeus->device_id, libusb_error_name(err));
+			return false;
+		}
+	} else {
 		ret = zeus_serial_read(info->device_fd, evtpkt, sizeof(evtpkt), 1, NULL);
-		if (ret <= 0)
+		if (ret < 0) {
+			info->serial_reopen = true;
+			return false;
+		}
+		if (ret == 0)
 			return false;
 		flush_uart(info->device_fd);
 	}
@@ -750,8 +754,10 @@ static bool zeus_send_work(struct cgpu_info *zeus, struct work *work)
 			return false;
 	} else {			// otherwise direct via serial port
 		ret = zeus_serial_write(info->device_fd, cmdpkt, sizeof(cmdpkt));
-		if (ret < 0)
+		if (ret < 0) {
+			info->serial_reopen = true;
 			return false;
+		}
 	}
 
 	return true;
@@ -762,39 +768,26 @@ static void *zeus_io_thread(void *data)
 	struct cgpu_info *zeus = (struct cgpu_info *)data;
 	struct ZEUS_INFO *info = zeus->device_data;
 	char threadname[24];
-	struct pollfd pfds[2];
 	struct timeval tv_now, tv_spent, tv_rem;
 	int retval;
-	bool reopen_device = (using_serial(info) && info->device_fd == -1) ? true : false;
 
 	snprintf(threadname, sizeof(threadname), "Zeus/%d", zeus->device_id);
 	RenameThread(threadname);
 	applog(LOG_INFO, "%s%d: serial I/O thread running, %s",
 						zeus->drv->name, zeus->device_id, threadname);
 
-	if (using_libusb(info))	// in libusb mode get nonces from another thread via pipe
-		pfds[0].fd = info->zm_pipefd[PIPE_R];
-				// in serial mode pfds[0].fd is set in the while loop
-	pfds[0].events = POLLIN;
-	pfds[0].revents = 0;
-	pfds[1].fd = info->wu_pipefd[PIPE_R];
-	pfds[1].events = POLLIN;
-	pfds[1].revents = 0;
-
 	while (likely(!zeus->shutdown)) {
 		mutex_lock(&info->lock);
-		if (unlikely(reopen_device)) {
-			if (!zeus_reopen(zeus)) {
+		if (unlikely(info->serial_reopen)) {
+			if (using_serial(info) && !zeus_reopen(zeus)) {
 				applog(LOG_ERR, "Failed to reopen %s%d on %s, shutting down",
 					zeus->drv->name, zeus->device_id, zeus->device_path);
 				mutex_unlock(&info->lock);
 				break;
 			}
 			zeus_purge_work(zeus);
-			reopen_device = false;
+			info->serial_reopen = false;
 		}
-		if (using_serial(info))
-			pfds[0].fd = info->device_fd;
 		mutex_unlock(&info->lock);
 
 		zeus_check_need_work(zeus);
@@ -813,10 +806,9 @@ static void *zeus_io_thread(void *data)
 					info->next_chip_clk = -1;
 				}
 			} else {
-				mutex_unlock(&info->lock);
-				applog(LOG_NOTICE, "%s%d: I/O error while sending work, will attempt to reopen device",
+				applog(LOG_NOTICE, "%s%d: I/O error while sending work, will retry",
 					zeus->drv->name, zeus->device_id);
-				reopen_device = true;
+				mutex_unlock(&info->lock);
 				continue;
 			}
 		}
@@ -829,63 +821,20 @@ static void *zeus_io_thread(void *data)
 		if (opt_zeus_debug) {
 			applog(LOG_DEBUG, "Workstart: %d.%06d", (int)info->workstart.tv_sec, (int)info->workstart.tv_usec);
 			applog(LOG_DEBUG, "Spent: %d.%06d", (int)tv_spent.tv_sec, (int)tv_spent.tv_usec);
-			applog(LOG_DEBUG, "select timeout: %d.%06d", (int)tv_rem.tv_sec, (int)tv_rem.tv_usec);
+			applog(LOG_DEBUG, "Remaining: %d.%06d", (int)tv_rem.tv_sec, (int)tv_rem.tv_usec);
 		}
 
-		retval = poll(pfds, 2, (tv_rem.tv_sec * 1000) + (tv_rem.tv_usec / 1000));
-
-		if (retval < 0) {				// error
+		retval = cgsem_mswait(&info->wusem, (tv_rem.tv_sec < 1) ? 5000 : tv_rem.tv_sec * 1000);
+		if (retval < 0) {
 			if (errno == EINTR)
 				continue;
-			applog(LOG_NOTICE, "%s%d: Error on poll: %s, shutting down",
-				zeus->drv->name, zeus->device_id, strerror(errno));
 			break;
-		} else if (retval > 0) {
-			if (pfds[0].revents & (POLLERR | POLLNVAL)) {	// low level I/O error (usually hardware)
-				pfds[0].revents = 0;
-				if (opt_zeus_debug) {
-					if (pfds[0].revents & POLLNVAL)
-						applog(LOG_DEBUG, "%s%d: Device file descriptor %d invalid",
-						       zeus->drv->name, zeus->device_id, pfds[0].fd);
-					else
-						applog(LOG_DEBUG, "%s%d: Error on file descriptor %d",
-						       zeus->drv->name, zeus->device_id, pfds[0].fd);
-				}
-
-				reopen_device = true;
-				continue;
-			}
-
-			if (pfds[0].revents & POLLIN) {		// event packet
-				pfds[0].revents = 0;
-				mutex_lock(&info->lock);
-				cgtime(&info->workend);
-				if (!zeus_read_response(zeus)) {
-					applog(LOG_NOTICE, "%s%d: I/O error while reading response, will attempt to reopen device",
-						zeus->drv->name, zeus->device_id);
-					reopen_device = true;
-				}
-				mutex_unlock(&info->lock);
-			}
-
-			if (pfds[1].revents & POLLIN) {		// miner thread woke us up
-				pfds[1].revents = 0;
-				if (!flush_fd(info->wu_pipefd[PIPE_R])) {
-					// this should never happen, only here in case
-					// an internal error causes pipe to be closed
-					applog(LOG_ERR, "%s%d: Inter-thread pipe closed, miner thread dead?",
-							zeus->drv->name, zeus->device_id);
-					break;
-				}
-			}
-		} else {					// timeout
+		}
+		if (retval == ETIMEDOUT) {
 			mutex_lock(&info->lock);
-			zeus_purge_work(zeus);			// abandon current work
+			zeus_purge_work(zeus);		// abandon current work
 			mutex_unlock(&info->lock);
 		}
-
-		if (opt_zeus_debug)
-			applog(LOG_DEBUG, "poll returned %d", retval);
 	}
 
 	zeus->shutdown = true;
@@ -925,13 +874,10 @@ static bool zeus_prepare(struct thr_info *thr)
 	applog(LOG_NOTICE, "%s%d opened on %s",
 			zeus->drv->name, zeus->device_id, zeus->device_path);
 
+	info->serial_reopen = (using_serial(info)) ? true : false;
 	info->thr = thr;
 	mutex_init(&info->lock);
-
-	if (pipe(info->wu_pipefd) < 0 || (using_libusb(info) && pipe(info->zm_pipefd) < 0)) {
-		applog(LOG_ERR, "zeus_prepare: error on pipe: %s", strerror(errno));
-		return false;
-	}
+	cgsem_init(&info->wusem);
 
 	return true;
 }
@@ -956,27 +902,12 @@ static int64_t zeus_scanwork(struct thr_info *thr)
 	struct cgpu_info *zeus = thr->cgpu;
 	struct ZEUS_INFO *info = zeus->device_data;
 	struct timeval old_scanwork_time;
-	unsigned char evtpkt[ZEUS_EVENT_PKT_LEN];
-	int err, ret;
 	double elapsed_s;
 	int64_t estimate_hashes;
 
-	/* in libusb mode, we use this opportunity to check if the miner has a
-	 * new nonce value for us; if so we relay it to the I/O thread via pipe */
-	if (using_libusb(info)) {
-		err = usb_read_timeout(zeus, (char *)evtpkt, sizeof(evtpkt), &ret, 250, C_GETRESULTS);
-		if (err && err != LIBUSB_ERROR_TIMEOUT) {
-			applog(LOG_ERR, "%s%d: USB read error: %s",
-				zeus->drv->name, zeus->device_id, libusb_error_name(err));
-			close(info->zm_pipefd[PIPE_W]);  // this will cause the I/O thread to shutdown also
-		}
-		if (ret == sizeof(evtpkt))
-			write(info->zm_pipefd[PIPE_W], evtpkt, sizeof(evtpkt));
-	} else {
-		/* in serial mode we have nothing to so, so sleep for a bit
-		 * to prevent this from becoming a busy-loop */
-		cgsleep_ms(100);
-	}
+	mutex_lock(&info->lock);
+	zeus_read_response(zeus);	// reads either from serial or libusb// and times out after ~250 ms
+	mutex_unlock(&info->lock);
 
 	mutex_lock(&info->lock);
 	old_scanwork_time = info->scanwork_time;
@@ -1121,13 +1052,7 @@ static void zeus_shutdown(struct thr_info *thr)
 
 	pthread_join(info->pth_io, NULL);
 	mutex_destroy(&info->lock);
-	close(info->wu_pipefd[PIPE_R]);
-	close(info->wu_pipefd[PIPE_W]);
-
-	if (using_libusb(info)) {
-		close(info->zm_pipefd[PIPE_R]);
-		close(info->zm_pipefd[PIPE_W]);
-	}
+	cgsem_destroy(&info->wusem);
 
 	if (info->device_fd != -1) {
 		zeus_serial_close(info->device_fd);
