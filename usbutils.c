@@ -402,13 +402,22 @@ static struct usb_intinfo gsd3_ints[] = {
 #endif
 
 #ifdef USE_ZEUS
-static struct usb_epinfo zus_epinfos[] = {
+static struct usb_epinfo zus_epinfos_cp2102[] = {
 	{ LIBUSB_TRANSFER_TYPE_BULK,	64,	EPI(1), 0, 0 },
 	{ LIBUSB_TRANSFER_TYPE_BULK,	64,	EPO(1), 0, 0 }
 };
 
-static struct usb_intinfo zus_ints[] = {
-	USB_EPS(0, zus_epinfos)
+static struct usb_intinfo zus_ints_cp2102[] = {
+	USB_EPS(0, zus_epinfos_cp2102)
+};
+
+static struct usb_epinfo zus_epinfos_ftdi[] = {
+	{ LIBUSB_TRANSFER_TYPE_BULK,	64,	EPI(1), 0, 0 },
+	{ LIBUSB_TRANSFER_TYPE_BULK,	64,	EPO(2), 0, 0 }
+};
+
+static struct usb_intinfo zus_ints_ftdi[] = {
+	USB_EPS(0, zus_epinfos_ftdi)
 };
 #endif
 
@@ -777,14 +786,25 @@ static struct usb_find_devices find_dev[] = {
 	{
 		.drv = DRIVER_zeus,
 		.name = "ZUS",
-		.ident = IDENT_ZUS,
+		.ident = IDENT_ZUS1,
 		.idVendor = 0x10c4,
 		.idProduct = 0xea60,
 		.iProduct = "CP2102 USB to UART Bridge Controller",
 		.config = 1,
 		.timeout = ZEUS_TIMEOUT_MS,
 		.latency = LATENCY_STD,
-		INTINFO(zus_ints) },
+		INTINFO(zus_ints_cp2102) },
+	{
+		.drv = DRIVER_zeus,
+		.name = "ZUS",
+		.ident = IDENT_ZUS2,
+		.idVendor = IDVENDOR_FTDI,
+		.idProduct = 0x6001,
+		.iProduct = "FT232R USB UART",
+		.config = 1,
+		.timeout = ZEUS_TIMEOUT_MS,
+		.latency = LATENCY_STD,
+		INTINFO(zus_ints_ftdi) },
 #endif
 	{ DRIVER_MAX, NULL, 0, 0, 0, NULL, NULL, 0, 0, 0, 0, NULL }
 };

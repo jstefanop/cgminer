@@ -70,6 +70,11 @@
 // LLT = BLT (same code)
 #define FTDI_VALUE_DATA_BLT 8
 
+// ZUS = AVA or LLT
+#define FTDI_VALUE_BAUD_ZUS 0x001a
+#define FTDI_INDEX_BAUD_ZUS 0x0000
+#define FTDI_VALUE_DATA_ZUS 8
+
 #define FTDI_VALUE_FLOW 0
 #define FTDI_VALUE_MODEM 0x0303
 
@@ -165,7 +170,8 @@ enum sub_ident {
 	IDENT_GSD1,
 	IDENT_GSD2,
 	IDENT_GSD3,
-	IDENT_ZUS
+	IDENT_ZUS1,
+	IDENT_ZUS2
 };
 
 struct usb_find_devices {

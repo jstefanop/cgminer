@@ -47,5 +47,10 @@ ATTRS{idVendor}=="1cbe", ATTRS{idProduct}=="0003", SUBSYSTEM=="usb", ACTION=="ad
 # Drillbit Thumb
 ATTRS{idVendor}=="03eb", ATTRS{idProduct}=="2404", SUBSYSTEM=="usb", ACTION=="add", MODE="0666", GROUP="plugdev"
 
-#Gridseed
+# Gridseed
 ATTRS{idVendor}=="0483", ATTRS{idProduct}=="5740", SUBSYSTEM=="usb", ACTION=="add", MODE="0666", GROUP="plugdev"
+
+# Zeus
+# (already covered by Antminer and Avalon, just for documentation)
+#ATTRS{idVendor}=="10c4", ATTRS{idProduct}=="ea60", SUBSYSTEM=="usb", ACTION=="add", MODE="0666", GROUP="plugdev"
+#ATTRS{idVendor}=="0403", ATTRS{idProduct}=="6001", SUBSYSTEM=="usb", ACTION=="add", MODE="0666", GROUP="plugdev"

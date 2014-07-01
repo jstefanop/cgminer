@@ -109,11 +109,10 @@ int serial_autodetect_devserial(__maybe_unused detectone_func_t detectone, __may
 #endif
 }
 
-int _serial_detect(struct device_drv *drv, detectone_func_t detectone, autoscan_func_t autoscan, bool forceauto)
+int _serial_detect(struct device_drv *drv, detectone_func_t detectone, autoscan_func_t autoscan, bool forceauto, bool inhibitauto)
 {
 	struct string_elist *iter, *tmp;
 	const char *dev, *colon;
-	bool inhibitauto = false;
 	char found = 0;
 	size_t namel = strlen(drv->name);
 	size_t dnamel = strlen(drv->dname);

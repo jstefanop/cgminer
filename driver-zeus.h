@@ -19,9 +19,10 @@
 #define ZEUS_EVENT_PKT_LEN		4
 
 #define ZEUS_CLK_MAX			382	// 0xff * 3/2
-#define ZEUS_CLK_MIN			200
+#define ZEUS_CLK_MIN			2
 
-#define ZEUS_USB_ID_MODEL_STR		"CP2102_USB_to_UART_Bridge_Controller"
+#define ZEUS_USB_ID_MODEL_STR1		"CP2102_USB_to_UART_Bridge_Controller"
+#define ZEUS_USB_ID_MODEL_STR2		"FT232R_USB_UART"
 
 #define PIPE_R 0
 #define PIPE_W 1
@@ -40,7 +41,7 @@ struct ZEUS_INFO {
 	struct timeval	workend;
 	struct timeval	scanwork_time;
 	struct timeval	work_timeout;
-	uint32_t	hashes_per_ms;
+	double		hashes_per_s;
 	uint64_t	golden_speed_per_core;	// speed per core per sec
 	uint32_t	read_count;
 	uint32_t	last_nonce;
@@ -49,7 +50,7 @@ struct ZEUS_INFO {
 	unsigned char	freqcode;
 
 	struct thr_info	*thr;
-	pthread_t	pth_io;
+	pthread_t	sworkpth;
 	pthread_mutex_t	lock;
 	cgsem_t		wusem;
 
